@@ -1,0 +1,6 @@
+[package]
+name = "rusty-toys"
+version = "0.1.0"
+authors = ["Laurent Belmonte <laurent.belmonte@gmail.com>"]
+
+[dependencies]
