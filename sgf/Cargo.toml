@@ -1,7 +1,7 @@
 [package]
-name = "rusty-toys"
+name = "sgf-parser"
 version = "0.1.0"
 authors = ["Laurent Belmonte <laurent.belmonte@gmail.com>"]
 
-[dependencies.sgf-parser]
-path = "sgf"
+[dependencies]
+nom = "4.0.0-beta1"
