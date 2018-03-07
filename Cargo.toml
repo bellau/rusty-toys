@@ -3,5 +3,16 @@ name = "rusty-toys"
 version = "0.1.0"
 authors = ["Laurent Belmonte <laurent.belmonte@gmail.com>"]
 
+[dependencies]
+byteorder="1"
+bincode="1"
+serde = "1.0.27"
+serde_derive = "1.0.27"
+itertools="0.7.7"
+rand="0.4.2"
+
+[dependencies.rocksdb]
+git = "https://github.com/spacejam/rust-rocksdb"
+
 [dependencies.sgf-parser]
 path = "sgf"
