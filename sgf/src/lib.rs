@@ -44,7 +44,7 @@ named!(pub node_parser<&[u8],Node>,
     ))
 );
 
-named!(gametree_parser<&[u8],GameTree>,
+named!(pub gametree_parser<&[u8],GameTree>,
     ws!(do_parse!(
      tag!("(") >>
       nodes : many0!(node_parser) >>
