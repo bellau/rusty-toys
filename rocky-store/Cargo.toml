@@ -1,5 +1,5 @@
 [package]
-name = "rusty-toys"
+name = "rocky"
 version = "0.1.0"
 authors = ["Laurent Belmonte <laurent.belmonte@gmail.com>"]
 
@@ -13,12 +13,3 @@ rand="0.4.2"
 
 [dependencies.rocksdb]
 git = "https://github.com/spacejam/rust-rocksdb"
-
-#[dependencies.sgf-parser]
-#path = "sgf"
-
-[dependencies.rocky]
-path = "rocky-store"
-
-[dependencies.mailbox]
-path = "../rust-mailbox"
