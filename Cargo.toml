@@ -10,6 +10,7 @@ serde = "1.0.27"
 serde_derive = "1.0.27"
 itertools = "0.7.7"
 rand="0.4.2"
+mailparse = "0.6.0"
 
 [dependencies.rocksdb]
 git = "https://github.com/spacejam/rust-rocksdb"
@@ -20,5 +21,3 @@ git = "https://github.com/spacejam/rust-rocksdb"
 [dependencies.rocky]
 path = "rocky-store"
 
-[dependencies.mailbox]
-path = "../rust-mailbox"
