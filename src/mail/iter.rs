@@ -1,8 +1,6 @@
 use std::io::{self, BufReader, Read};
 use std::iter::Peekable;
 use mail::lines::Lines;
-use std::io::BufRead;
-use std::io::ErrorKind;
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 enum State {
@@ -64,20 +62,8 @@ impl<R: Read> Iterator for Iter<R> {
 			);
 		}
 
-        macro_rules! utf8 {
-			($body:expr) => (
-				match $body {
-					Ok(value) =>
-						value,
-
-					Err(_) =>
-						return Some(Err(io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8")))
-				}
-			);
-		}
-
         loop {
-            let (offset, line) = try!(eof!(self.input.next()));
+            let (_, line) = try!(eof!(self.input.next()));
 
             match self.state {
                 State::Begin => {
@@ -105,4 +91,3 @@ impl<R: Read> Iterator for Iter<R> {
         }
     }
 }
-

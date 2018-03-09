@@ -9,10 +9,10 @@ pub enum SgfParseError {
     InvalidMoveCoordinate(String),
 }
 
-#[derive(PartialEq,Debug)]
+#[derive(PartialEq, Debug)]
 pub struct GameTree {
-  pub nodes: Vec<Node>,
-  pub gametrees: Vec<GameTree>,
+    pub nodes: Vec<Node>,
+    pub gametrees: Vec<GameTree>,
 }
 
 pub type Node = Vec<Property>;
@@ -104,8 +104,7 @@ impl<'a> TryFrom<&'a str> for Coordinate {
     fn try_from(s: &'a str) -> Result<Coordinate, SgfParseError> {
         match *s.as_bytes() {
             [x, y] => {
-                if let (Some(x), Some(y)) = (char_code_to_coordinate(x), char_code_to_coordinate(y))
-                {
+                if let (Some(x), Some(y)) = (char_code_to_coordinate(x), char_code_to_coordinate(y)) {
                     Ok(Coordinate(x, y))
                 } else {
                     Err(SgfParseError::InvalidMoveCoordinate(s.to_owned()))
