@@ -15,7 +15,6 @@ fn main() {
         store.compact();
 
         println!("read some mails");
-
         let it = mail::iter::Iter::new(File::open("../test.mbox").unwrap());
 
         let mut buf: Vec<u8> = vec![];
@@ -25,7 +24,7 @@ fn main() {
                     println!("{:?}", error);
                 }
                 Ok(e) => match e {
-                    mail::iter::Entry::From(v) => {}
+                    mail::iter::Entry::From(_) => {}
                     mail::iter::Entry::Body(b) => {
                         buf.extend(b);
                         buf.push(b'\r');
@@ -47,30 +46,36 @@ fn main() {
                                     }
                                     let subject = m.headers.get_first_value("Subject").unwrap();
                                     let from = m.headers.get_first_value("From").unwrap();
+                                    let date = m.headers.get_first_value("Date").unwrap();
+                                    let date = if let Some(ds) = date {
+                                        mailparse::dateparse(&ds).unwrap_or_else(|_| 0)
+                                    } else {
+                                        0
+                                    };
 
                                     let msg = Msg {
                                         subject: subject,
                                         from: from,
                                         text: text,
+                                        date: date,
                                     };
 
                                     store.put(&msg).unwrap();
                                 }
-                                Err(e) => {
+                                Err(_) => {
                                     println!("err mail {}", std::str::from_utf8(&buf[..]).unwrap());
                                 }
                             }
                         }
-                        //  println!("end {}", i);
                         buf.clear();
                     }
                 },
                 _ => {}
             }
         }
-
         store.compact();
     }
+
     let store = Store::open("/tmp/teststorage").unwrap();
     store.compact();
     for _i in 0..100 {
@@ -81,5 +86,36 @@ fn main() {
             }
             None => println!("none"),
         };
+    }
+
+    let res = store.find_by_name("test").unwrap();
+    let docs = if let Some(res) = res {
+        res
+    } else {
+        DocIdSet::default()
+    };
+
+    let res = store.find_by_name("of").unwrap();
+
+    let docs = if let Some(res) = res {
+        docs & res
+    } else {
+        docs
+    };
+
+    let res = store.find_by_name("mine").unwrap();
+
+    let docs = if let Some(res) = res {
+        docs & res
+    } else {
+        docs
+    };
+
+    println!("doc len {:?}", docs.len());
+    for d in store.iterate_date().unwrap() {
+        let t = d.1 & &docs;
+        if t.len() > 0 {
+            println!("date {}", d.0);
+        }
     }
 }

@@ -14,6 +14,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use roaring::bitmap::RoaringBitmap;
 use std::str;
 
+pub type DocIdSet = RoaringBitmap;
+
 struct DocId(u32);
 
 impl DocId {
@@ -28,6 +30,30 @@ impl DocId {
     }
 }
 
+impl Iterator for StoreIt {
+    type Item = (i64, DocIdSet);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.0.next();
+        if next.is_none() {
+            return None;
+        }
+
+        let next = next.unwrap();
+        if next.0.len() < "msg#date#".len() {
+            return None;
+        }
+        let f = &next.0[.."msg#date#".len()];
+        if f != &b"msg#date#"[..] {
+            return None;
+        }
+        let date = &next.0["msg#date#".len()..];
+        let d = BigEndian::read_i64(date);
+        let docs: DocIdsMsg = DocIdsMsg::deserialize(&next.1);
+
+        Some((d, docs.0))
+    }
+}
 pub struct Store {
     db: DB,
     index_cf: ColumnFamily,
@@ -42,6 +68,7 @@ pub struct Msg {
     pub subject: Option<String>,
     pub from: Option<String>,
     pub text: String,
+    pub date: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,9 +160,12 @@ fn concat_merge(_new_key: &[u8], existing_val: Option<&[u8]>, operands: &mut Mer
     for r in remove {
         ret.difference_with(&r);
     }
+
     let sr = DocIdsMsg(ret, RoaringBitmap::default()).serialize();
     Some(sr)
 }
+
+pub struct StoreIt(rocksdb::DBIterator);
 
 impl Store {
     fn default_options() -> Options {
@@ -236,6 +266,23 @@ impl Store {
         Ok(())
     }
 
+    fn shred_date(&self, batch: &mut WriteBatch, doc_id: &DocId, name: &str, value: i64) -> Result<(), StoreError> {
+        let base_key = format!("msg#{}#", name);
+        let mut key: Vec<u8> = Vec::with_capacity(base_key.len() + 8);
+        key.extend(base_key.as_bytes());
+
+        let mut v: Vec<u8> = vec![0; 8];
+        BigEndian::write_i64(&mut v, value);
+        key.extend(&v[..]);
+        batch.merge_cf(
+            self.index_cf,
+            &key[..],
+            &DocIdsMsg::one(doc_id).serialize()[..],
+        )?;
+
+        Ok(())
+    }
+
     fn shred(&self, batch: &mut WriteBatch, doc_id: &DocId, msg: &Msg) -> Result<(), StoreError> {
         let from = msg.from.as_ref();
         if let Some(from) = from {
@@ -243,6 +290,8 @@ impl Store {
         }
 
         self.shred_text(batch, doc_id, "body", &msg.text)?;
+
+        self.shred_date(batch, doc_id, "date", msg.date);
         let subject = msg.subject.as_ref();
         if let Some(subject) = subject {
             self.shred_text(batch, doc_id, "subject", subject)
@@ -263,7 +312,15 @@ impl Store {
         self.db.compact_range_cf(self.index_cf, None, None);
     }
 
-    pub fn find_by_name(&self, name: &str) -> Result<Option<DocIds>, StoreError> {
+    pub fn iterate_date(&self) -> Result<StoreIt, StoreError> {
+        let mut key = Vec::new();
+        key.extend(b"msg#date#".iter());
+
+        use rocksdb::DBIterator;
+        let it: DBIterator = self.db.prefix_iterator_cf(self.index_cf, &key[..])?;
+        Ok(StoreIt(it))
+    }
+    pub fn find_by_name(&self, name: &str) -> Result<Option<DocIdSet>, StoreError> {
         let mut key = Vec::new();
         key.extend(b"msg#body#".iter());
         key.extend(name.as_bytes());
@@ -282,7 +339,7 @@ impl Store {
                 let elapsed = now.elapsed();
                 let sec = (elapsed.as_secs() as f64) + (elapsed.subsec_nanos() as f64 / 1000_000.0);
                 println!("fin: {} ms", sec);
-                Ok(Some(docs.0.iter().collect()))
+                Ok(Some(docs.0))
             }
             None => Ok(None),
         }
