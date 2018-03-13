@@ -1,0 +1,12 @@
+[package]
+name = "mailproto"
+version = "0.1.0"
+authors = ["Laurent Belmonte <laurent.belmonte@gmail.com>"]
+
+[dependencies]
+bytes = "0.4.6"
+prost = "0.3.2"
+prost-derive = "0.3.2"
+
+[build-dependencies]
+prost-build = "0.3.2"

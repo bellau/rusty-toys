@@ -18,6 +18,9 @@ git = "https://github.com/spacejam/rust-rocksdb"
 #[dependencies.sgf-parser]
 #path = "sgf"
 
+[dependencies.mailproto]
+path = "mailproto"
+
 [dependencies.rocky]
 path = "rocky-store"
 
