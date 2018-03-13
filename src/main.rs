@@ -10,9 +10,18 @@ mod mail;
 use mailparse::MailHeaderMap;
 
 fn main() {
+    use std::collections::HashMap;
+    let mut collections: HashMap<String, u32> = HashMap::new();
+
     {
         let mut store = Store::open("/tmp/teststorage").unwrap();
         store.compact();
+
+        let colls = store.collections().unwrap();
+        for col in colls {
+            collections.insert(col.1.clone(), col.0);
+            println!("existing coll {}", col.1);
+        }
 
         println!("read some mails");
         let it = mail::iter::Iter::new(File::open("../test.mbox").unwrap());
@@ -47,6 +56,19 @@ fn main() {
                                     let subject = m.headers.get_first_value("Subject").unwrap();
                                     let from = m.headers.get_first_value("From").unwrap();
                                     let date = m.headers.get_first_value("Date").unwrap();
+                                    let labels = m.headers.get_first_value("X-Gmail-Labels").unwrap();
+                                    let mut collection_ids = vec![];
+                                    if let Some(l) = labels {
+                                        let slabels = l.split(",");
+                                        for l in slabels {
+                                            if !collections.contains_key(l) {
+                                                let col = store.create_collection(l.to_string()).unwrap();
+                                                collections.insert(col.1, col.0);
+                                            }
+                                            collection_ids.push(collections[l]);
+                                        }
+                                    }
+
                                     let date = if let Some(ds) = date {
                                         mailparse::dateparse(&ds).unwrap_or_else(|_| 0)
                                     } else {
@@ -58,6 +80,7 @@ fn main() {
                                         from: from,
                                         text: text,
                                         date: date,
+                                        collections: collection_ids,
                                     };
 
                                     store.put(&msg).unwrap();
@@ -117,5 +140,14 @@ fn main() {
         if t.len() > 0 {
             println!("date {}", d.0);
         }
+    }
+
+    let res = store
+        .find_by_col(collections[&"Non lus".to_string()])
+        .unwrap();
+    if let Some(res) = res {
+        println!("doc len {:?} unread", docs.len());
+    } else {
+        println!("no unread");
     }
 }

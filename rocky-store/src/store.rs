@@ -17,6 +17,7 @@ use std::str;
 pub type DocIdSet = RoaringBitmap;
 
 struct DocId(u32);
+pub struct Collection(pub u32, pub String);
 
 impl DocId {
     fn parse(data: &[u8]) -> DocId {
@@ -69,6 +70,7 @@ pub struct Msg {
     pub from: Option<String>,
     pub text: String,
     pub date: i64,
+    pub collections: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -283,6 +285,24 @@ impl Store {
         Ok(())
     }
 
+    fn shred_collection(&self, batch: &mut WriteBatch, doc_id: &DocId, collections: &Vec<u32>) -> Result<(), StoreError> {
+        let base_key = "msg#cols#";
+        for col in collections {
+            let mut key: Vec<u8> = Vec::with_capacity(base_key.len() + 4);
+            key.extend(base_key.as_bytes());
+
+            let mut v: Vec<u8> = vec![0; 4];
+            BigEndian::write_u32(&mut v, *col);
+            key.extend(&v[..]);
+            batch.merge_cf(
+                self.index_cf,
+                &key[..],
+                &DocIdsMsg::one(doc_id).serialize()[..],
+            )?;
+        }
+        Ok(())
+    }
+
     fn shred(&self, batch: &mut WriteBatch, doc_id: &DocId, msg: &Msg) -> Result<(), StoreError> {
         let from = msg.from.as_ref();
         if let Some(from) = from {
@@ -291,7 +311,8 @@ impl Store {
 
         self.shred_text(batch, doc_id, "body", &msg.text)?;
 
-        self.shred_date(batch, doc_id, "date", msg.date);
+        self.shred_date(batch, doc_id, "date", msg.date)?;
+        self.shred_collection(batch, doc_id, &msg.collections)?;
         let subject = msg.subject.as_ref();
         if let Some(subject) = subject {
             self.shred_text(batch, doc_id, "subject", subject)
@@ -320,10 +341,73 @@ impl Store {
         let it: DBIterator = self.db.prefix_iterator_cf(self.index_cf, &key[..])?;
         Ok(StoreIt(it))
     }
+
+    pub fn create_collection(&mut self, name: String) -> Result<Collection, StoreError> {
+        let doc_id = self.next_doc()?;
+        let mut key = Vec::new();
+        key.extend(b"collections#".iter());
+
+        let mut batch = WriteBatch::default();
+
+        let v = doc_id.write();
+        key.extend(&v[..]);
+
+        batch.put(&key[..], &name.as_bytes())?;
+        self.db.write(batch)?;
+        Ok(Collection(doc_id.0, name))
+    }
+    pub fn collections(&self) -> Result<Vec<Collection>, StoreError> {
+        let mut key = Vec::new();
+        key.extend(b"collections#".iter());
+
+        let mut ret = vec![];
+        use rocksdb::DBIterator;
+        let it: DBIterator = self.db.prefix_iterator(&key[..]);
+        for v in it {
+            let k = v.0;
+            if k.len() < b"collections#".len() || &k[0..b"collections#".len()] != b"collections#" {
+                break;
+            }
+
+            ret.push(Collection(
+                DocId::parse(&k[b"collections#".len()..]).0,
+                str::from_utf8(&v.1).unwrap().to_string(),
+            ))
+        }
+        Ok(ret)
+    }
+
     pub fn find_by_name(&self, name: &str) -> Result<Option<DocIdSet>, StoreError> {
         let mut key = Vec::new();
         key.extend(b"msg#body#".iter());
         key.extend(name.as_bytes());
+        use std::time::Instant;
+        let now = Instant::now();
+
+        let res = self.db.get_cf(self.index_cf, &key[..])?;
+        let elapsed = now.elapsed();
+        let sec = (elapsed.as_secs() as f64) + (elapsed.subsec_nanos() as f64 / 1000_000.0);
+        println!("find rocks: {} ms", sec);
+
+        match res {
+            Some(r) => {
+                let docs: DocIdsMsg = DocIdsMsg::deserialize(r.deref());
+
+                let elapsed = now.elapsed();
+                let sec = (elapsed.as_secs() as f64) + (elapsed.subsec_nanos() as f64 / 1000_000.0);
+                println!("fin: {} ms", sec);
+                Ok(Some(docs.0))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn find_by_col(&self, col_id: u32) -> Result<Option<DocIdSet>, StoreError> {
+        let mut key = Vec::new();
+        key.extend(b"msg#cols#".iter());
+        let mut v: Vec<u8> = vec![0; 4];
+        BigEndian::write_u32(&mut v, col_id);
+        key.extend(&v[..]);
         use std::time::Instant;
         let now = Instant::now();
 
