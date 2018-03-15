@@ -55,10 +55,18 @@ impl Iterator for StoreIt {
         Some((d, docs.0))
     }
 }
+
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicIsize, Ordering};
+use std::collections::HashMap;
 pub struct Store {
     db: DB,
     index_cf: ColumnFamily,
-    max_doc_id: DocId,
+    eml_cf: ColumnFamily,
+    mod_cf: ColumnFamily,
+    max_doc_id: AtomicIsize,
+    modseq_max: AtomicIsize,
+    cols: RwLock<(HashMap<u32, String>, HashMap<String, u32>)>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -71,6 +79,7 @@ pub struct Msg {
     pub text: String,
     pub date: i64,
     pub collections: Vec<u32>,
+    pub eml: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -184,6 +193,22 @@ impl Store {
         dopts
     }
 
+    fn eml_options() -> Options {
+        let mut dopts = Options::default();
+        dopts.set_merge_operator("test", concat_merge, None);
+        dopts.create_if_missing(true);
+        dopts.set_report_bg_io_stats(true);
+        dopts.enable_statistics();
+        dopts.set_stats_dump_period_sec(10);
+        let mut bb_opts = BlockBasedOptions::default();
+        bb_opts.set_lru_cache(10_000);
+        dopts.set_block_based_table_factory(&bb_opts);
+        dopts.set_compression_per_level(&[
+         rocksdb::DBCompressionType::Snappy,
+         rocksdb::DBCompressionType::Snappy,]);
+        dopts
+    }
+
     fn index_options() -> Options {
         let mut opts = Options::default();
         opts.set_merge_operator("test", concat_merge, None);
@@ -215,28 +240,63 @@ impl Store {
 
         let default_cf = ColumnFamilyDescriptor::new("default", Store::default_options());
         let index_cf = ColumnFamilyDescriptor::new("index", Store::index_options());
-        let db = DB::open_cf_descriptors(&gopts, path, vec![default_cf, index_cf])?;
+        let eml_cf = ColumnFamilyDescriptor::new("eml", Store::eml_options());
+
+        let mod_cf = ColumnFamilyDescriptor::new("mod", Store::index_options());
+        let db = DB::open_cf_descriptors(&gopts, path, vec![default_cf, index_cf, mod_cf, eml_cf])?;
+        let mod_cf = match db.cf_handle("mod") {
+            Some(i) => i,
+            None => panic!(""),
+        };
         let max = match db.get(b"max_doc_id")? {
             Some(x) => DocId::parse(x.deref()),
             None => DocId(1),
         };
+
+        let modseq_max = match db.get_cf(mod_cf, b"modseq_max")? {
+            Some(x) => BigEndian::read_u64(x.deref()),
+            None => 1,
+        };
+
+        let cols = Store::collections_internal(&db)?;
+        let mut id_name = HashMap::new();
+        let mut name_id = HashMap::new();
+        for col in cols {
+            id_name.insert(col.0, col.1.clone());
+            name_id.insert(col.1.clone(), col.0);
+        }
         println!("max value {}", max.0);
         Ok(Store {
             index_cf: match db.cf_handle("index") {
                 Some(i) => i,
                 None => panic!(""),
             },
+            mod_cf: mod_cf,
+            eml_cf: match db.cf_handle("eml") {
+                Some(i) => i,
+                None => panic!(""),
+            },
             db: db,
-            max_doc_id: max,
+            max_doc_id: AtomicIsize::new(max.0 as isize),
+            modseq_max: AtomicIsize::new(modseq_max as isize),
+            cols: RwLock::new((id_name, name_id)),
         })
     }
 
-    fn next_doc(&mut self) -> Result<DocId, StoreError> {
-        let max = DocId(self.max_doc_id.0 + 1);
+    fn next_modseq(&self) -> Result<u64, StoreError> {
+        let max = self.modseq_max.fetch_add(1, Ordering::SeqCst) as u64;
+        let mut data = vec![0; 8];
+        BigEndian::write_u64(&mut data[..], max);
+
+        self.db.put_cf(self.mod_cf, b"modseq_max", &data[..])?;
+        Ok(max)
+    }
+
+    fn next_doc(&self) -> Result<DocId, StoreError> {
+        let max = DocId(self.max_doc_id.fetch_add(1, Ordering::SeqCst) as u32);
 
         self.db.put(b"max_doc_id", &max.write()[..])?;
-        self.max_doc_id = max;
-        Ok(DocId(self.max_doc_id.0))
+        Ok(max)
     }
 
     fn shred_text(&self, batch: &mut WriteBatch, doc_id: &DocId, name: &str, value: &str) -> Result<(), StoreError> {
@@ -321,10 +381,36 @@ impl Store {
         }
     }
 
-    pub fn put(&mut self, msg: &Msg) -> Result<(), StoreError> {
+    pub fn put(&self, msg: &Msg) -> Result<(), StoreError> {
         let doc_id = self.next_doc()?;
+
         let mut batch = WriteBatch::default();
+
+        // mod log
+        let base_mod_key = "mod#";
+        for col in &msg.collections {
+            let modseq = self.next_modseq()?;
+            let mut key: Vec<u8> = Vec::with_capacity(base_mod_key.len() + 8);
+            key.extend(base_mod_key.as_bytes());
+
+            let mut v: Vec<u8> = vec![0; 8];
+            BigEndian::write_u64(&mut v, modseq);
+            key.extend(&v[..]);
+
+            let mut v: Vec<u8> = vec![0; 4];
+            BigEndian::write_u32(&mut v, *col);
+            key.extend(&v[..]);
+            batch.put_cf(self.mod_cf, &key[..], b"add")?;
+        }
+
         self.shred(&mut batch, &doc_id, msg)?;
+
+        {
+            let base_eml_key = "eml#";
+            let mut key: Vec<u8> = Vec::with_capacity(base_eml_key.len() + 4);
+            key.extend(&doc_id.write()[..]);
+            batch.put_cf(self.eml_cf, &key[..], &msg.eml[..])?;
+        }
         self.db.write(batch)?;
         Ok(())
     }
@@ -342,7 +428,7 @@ impl Store {
         Ok(StoreIt(it))
     }
 
-    pub fn create_collection(&mut self, name: String) -> Result<Collection, StoreError> {
+    pub fn create_collection(&self, name: String) -> Result<Collection, StoreError> {
         let doc_id = self.next_doc()?;
         let mut key = Vec::new();
         key.extend(b"collections#".iter());
@@ -356,13 +442,14 @@ impl Store {
         self.db.write(batch)?;
         Ok(Collection(doc_id.0, name))
     }
-    pub fn collections(&self) -> Result<Vec<Collection>, StoreError> {
+
+    fn collections_internal(db: &DB) -> Result<Vec<Collection>, StoreError> {
         let mut key = Vec::new();
         key.extend(b"collections#".iter());
 
         let mut ret = vec![];
         use rocksdb::DBIterator;
-        let it: DBIterator = self.db.prefix_iterator(&key[..]);
+        let it: DBIterator = db.prefix_iterator(&key[..]);
         for v in it {
             let k = v.0;
             if k.len() < b"collections#".len() || &k[0..b"collections#".len()] != b"collections#" {
@@ -375,6 +462,16 @@ impl Store {
             ))
         }
         Ok(ret)
+    }
+
+    pub fn collections(&self) -> Result<Vec<Collection>, StoreError> {
+        let c = self.cols
+            .read()
+            .map_err(|_| StoreError::DbError("lock".to_string()))?;
+        Ok(c.0
+            .iter()
+            .map(|(key, value)| Collection(*key, value.clone()))
+            .collect())
     }
 
     pub fn find_by_name(&self, name: &str) -> Result<Option<DocIdSet>, StoreError> {

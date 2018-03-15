@@ -81,6 +81,7 @@ fn main() {
                                         text: text,
                                         date: date,
                                         collections: collection_ids,
+                                        eml : buf[..].to_vec()
                                     };
 
                                     store.put(&msg).unwrap();
