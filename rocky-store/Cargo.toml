@@ -8,6 +8,4 @@ byteorder="1"
 rand="0.4.2"
 unicode-segmentation = "0.1.2"
 roaring="0.5.2"
-
-[dependencies.rocksdb]
-git = "https://github.com/spacejam/rust-rocksdb"
+rocksdb= "0.9.1"

@@ -1,0 +1,62 @@
+
+
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "rockyproto.proto";
+option java_outer_classname = "RockyProto";
+
+package msgstore;
+
+service MessageStore {
+  rpc Put(PutRequest) returns (PutResponse) {}
+  rpc Collections(CollectionsRequest) returns (CollectionsResponse) {}
+  rpc CreateCollection(CreateCollectionRequest) returns (CreateCollectionResponse) {}
+}
+
+message CreateCollectionRequest {
+    string name = 1;
+}
+
+message CreateCollectionResponse {
+    Collection collection = 1;
+}
+
+message CollectionsRequest {
+
+}
+
+message Collection {
+    uint32 id = 1;
+    string name = 2;
+}
+
+message CollectionsResponse {
+    repeated Collection collections = 1;
+}
+
+message PutRequest {
+  repeated uint32 collections = 1;
+  Message msg = 2;
+}
+
+message PutResponse {
+
+}
+
+message MessageHeader {
+  string name = 1;
+  string value = 2;
+}
+
+message MessageMimePart {
+  repeated MessageHeader headers = 1;
+  bytes  data = 2;
+  MessageMimePart children = 3;
+}
+
+message Message {
+  string uid = 1;
+  repeated MessageHeader headers = 2;
+  MessageMimePart body = 3;
+}

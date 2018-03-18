@@ -1,7 +1,10 @@
 extern crate rocky;
 
+extern crate futures;
+extern crate grpc;
 extern crate mailparse;
-extern crate rand;
+extern crate protobuf;
+extern crate rocky_server;
 
 use std::string::String;
 use std::fs::File;
@@ -9,38 +12,39 @@ use rocky::store::*;
 mod mail;
 use mailparse::MailHeaderMap;
 
-fn main() {
-    use std::collections::HashMap;
-    let mut collections: HashMap<String, u32> = HashMap::new();
+use futures::Future;
 
-    {
-        let mut store = Store::open("/tmp/teststorage").unwrap();
-        store.compact();
+use futures::future::{loop_fn, Loop, LoopFn};
+use rocky_server::rockyproto::*;
+use rocky_server::rockyproto_grpc::*;
+use grpc::RequestOptions;
 
-        let colls = store.collections().unwrap();
-        for col in colls {
-            collections.insert(col.1.clone(), col.0);
-            println!("existing coll {}", col.1);
-        }
+use protobuf::repeated::RepeatedField;
 
-        println!("read some mails");
-        let it = mail::iter::Iter::new(File::open("../test.mbox").unwrap());
+struct MailIterator {
+    it: mail::iter::Iter<File>,
+}
 
+impl Iterator for MailIterator {
+    type Item = Message;
+
+    fn next(&mut self) -> Option<Self::Item> {
         let mut buf: Vec<u8> = vec![];
-        for entry in it {
-            match entry {
-                Err(error) => {
-                    println!("{:?}", error);
-                }
-                Ok(e) => match e {
-                    mail::iter::Entry::From(_) => {}
-                    mail::iter::Entry::Body(b) => {
-                        buf.extend(b);
-                        buf.push(b'\r');
-                        buf.push(b'\n');
+        loop {
+            let entry = self.it.next();
+            if let Some(entry) = entry {
+                match entry {
+                    Err(error) => {
+                        println!("{:?}", error);
                     }
-                    mail::iter::Entry::End => {
-                        {
+                    Ok(e) => match e {
+                        mail::iter::Entry::From(_) => {}
+                        mail::iter::Entry::Body(b) => {
+                            buf.extend(b);
+                            buf.push(b'\r');
+                            buf.push(b'\n');
+                        }
+                        mail::iter::Entry::End => {
                             let mail = mailparse::parse_mail(&buf[..]);
                             match mail {
                                 Ok(m) => {
@@ -53,102 +57,84 @@ fn main() {
                                             text.push_str(&p.get_body().unwrap());
                                         }
                                     }
-                                    let subject = m.headers.get_first_value("Subject").unwrap();
-                                    let from = m.headers.get_first_value("From").unwrap();
-                                    let date = m.headers.get_first_value("Date").unwrap();
-                                    let labels = m.headers.get_first_value("X-Gmail-Labels").unwrap();
-                                    let mut collection_ids = vec![];
-                                    if let Some(l) = labels {
-                                        let slabels = l.split(",");
-                                        for l in slabels {
-                                            if !collections.contains_key(l) {
-                                                let col = store.create_collection(l.to_string()).unwrap();
-                                                collections.insert(col.1, col.0);
-                                            }
-                                            collection_ids.push(collections[l]);
-                                        }
+
+                                    let mut t = Message::new();
+                                    let mut headers = vec![];
+                                    for h in m.headers {
+                                        let mut mh = MessageHeader::new();
+                                        mh.set_name(h.get_key().unwrap());
+                                        mh.set_value(h.get_value().unwrap());
+                                        headers.push(mh);
                                     }
-
-                                    let date = if let Some(ds) = date {
-                                        mailparse::dateparse(&ds).unwrap_or_else(|_| 0)
-                                    } else {
-                                        0
-                                    };
-
-                                    let msg = Msg {
-                                        subject: subject,
-                                        from: from,
-                                        text: text,
-                                        date: date,
-                                        collections: collection_ids,
-                                        eml : buf[..].to_vec()
-                                    };
-
-                                    store.put(&msg).unwrap();
+                                    t.set_headers(RepeatedField::from_vec(headers));
+                                    return Some(t);
                                 }
                                 Err(_) => {
                                     println!("err mail {}", std::str::from_utf8(&buf[..]).unwrap());
                                 }
                             }
                         }
-                        buf.clear();
+                    },
+                }
+            } else {
+                return None;
+            }
+        }
+    }
+}
+
+fn main() {
+    use grpc::Client;
+
+    use rocky_server::rockyproto::*;
+    use rocky_server::rockyproto_grpc::*;
+    use std::collections::HashMap;
+    let c = Client::new_plain("localhost", 50051, Default::default()).unwrap();
+    let client = MessageStoreClient::with_client(c.clone());
+    let res = client
+        .collections(RequestOptions::new(), CollectionsRequest::new())
+        .wait_drop_metadata();
+    //.unwrap();
+    let cols = if let Ok(ref res) = res {
+        res.get_collections()
+    } else {
+        &[]
+    };
+    let mut collections: HashMap<String, u32> = HashMap::new();
+    for col in cols {
+        collections.insert(col.get_name().to_string(), col.get_id());
+        println!("existing coll {}", col.get_id());
+    }
+    let it = MailIterator {
+        it: mail::iter::Iter::new(File::open("../test.mbox").unwrap()),
+    };
+
+    for mut msg in it {
+        let mut collection_ids = vec![];
+        for h in msg.clone().get_headers() {
+            if h.name == "X-Gmail-Labels" {
+                let slabels = h.value.split(",");
+                for l in slabels {
+                    if !collections.contains_key(l) {
+                        let mut cc = CreateCollectionRequest::new();
+                        cc.set_name(l.to_string());
+                        let r = client
+                            .create_collection(RequestOptions::new(), cc)
+                            .wait_drop_metadata()
+                            .unwrap();
+                        let col = r.get_collection();
+                        collections.insert(col.get_name().to_string(), col.get_id());
                     }
-                },
-                _ => {}
+                    collection_ids.push(collections[l]);
+                }
             }
+            let mut putr = PutRequest::new();
+            putr.set_collections(collection_ids.clone());
+            putr.set_msg(msg.clone());
+            client
+                .put(RequestOptions::new(), putr)
+                .wait_drop_metadata()
+                .unwrap();
         }
-        store.compact();
-    }
-
-    let store = Store::open("/tmp/teststorage").unwrap();
-    store.compact();
-    for _i in 0..100 {
-        let res = store.find_by_name("test").unwrap();
-        match res {
-            Some(docs) => {
-                println!("doc len {:?}", docs.len());
-            }
-            None => println!("none"),
-        };
-    }
-
-    let res = store.find_by_name("test").unwrap();
-    let docs = if let Some(res) = res {
-        res
-    } else {
-        DocIdSet::default()
-    };
-
-    let res = store.find_by_name("of").unwrap();
-
-    let docs = if let Some(res) = res {
-        docs & res
-    } else {
-        docs
-    };
-
-    let res = store.find_by_name("mine").unwrap();
-
-    let docs = if let Some(res) = res {
-        docs & res
-    } else {
-        docs
-    };
-
-    println!("doc len {:?}", docs.len());
-    for d in store.iterate_date().unwrap() {
-        let t = d.1 & &docs;
-        if t.len() > 0 {
-            println!("date {}", d.0);
-        }
-    }
-
-    let res = store
-        .find_by_col(collections[&"Non lus".to_string()])
-        .unwrap();
-    if let Some(res) = res {
-        println!("doc len {:?} unread", docs.len());
-    } else {
-        println!("no unread");
     }
 }

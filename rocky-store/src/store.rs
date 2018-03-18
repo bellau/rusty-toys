@@ -59,11 +59,17 @@ impl Iterator for StoreIt {
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::collections::HashMap;
+
+
+
+unsafe impl Send for Store {}
+
 pub struct Store {
     db: DB,
+    /*
     index_cf: ColumnFamily,
     eml_cf: ColumnFamily,
-    mod_cf: ColumnFamily,
+    mod_cf: ColumnFamily,*/
     max_doc_id: AtomicIsize,
     modseq_max: AtomicIsize,
     cols: RwLock<(HashMap<u32, String>, HashMap<String, u32>)>,
@@ -178,6 +184,13 @@ fn concat_merge(_new_key: &[u8], existing_val: Option<&[u8]>, operands: &mut Mer
 
 pub struct StoreIt(rocksdb::DBIterator);
 
+use std::fmt::{Formatter,Debug,Result as FmtResult};
+impl Debug for Store {
+    fn fmt(&self, f : &mut Formatter) -> FmtResult {
+        
+        write!(f, "hell")
+    }
+}
 impl Store {
     fn default_options() -> Options {
         let mut dopts = Options::default();
@@ -199,7 +212,6 @@ impl Store {
         dopts.create_if_missing(true);
         dopts.set_report_bg_io_stats(true);
         dopts.enable_statistics();
-        dopts.set_stats_dump_period_sec(10);
         let mut bb_opts = BlockBasedOptions::default();
         bb_opts.set_lru_cache(10_000);
         dopts.set_block_based_table_factory(&bb_opts);
@@ -267,6 +279,7 @@ impl Store {
         }
         println!("max value {}", max.0);
         Ok(Store {
+            /*
             index_cf: match db.cf_handle("index") {
                 Some(i) => i,
                 None => panic!(""),
@@ -275,7 +288,7 @@ impl Store {
             eml_cf: match db.cf_handle("eml") {
                 Some(i) => i,
                 None => panic!(""),
-            },
+            },*/
             db: db,
             max_doc_id: AtomicIsize::new(max.0 as isize),
             modseq_max: AtomicIsize::new(modseq_max as isize),
@@ -288,7 +301,8 @@ impl Store {
         let mut data = vec![0; 8];
         BigEndian::write_u64(&mut data[..], max);
 
-        self.db.put_cf(self.mod_cf, b"modseq_max", &data[..])?;
+        ;
+        self.db.put_cf(self.db.cf_handle("mod").unwrap(), b"modseq_max", &data[..])?;
         Ok(max)
     }
 
@@ -306,7 +320,7 @@ impl Store {
             key.extend(base_key.as_bytes());
             key.extend(s.as_bytes());
             batch.merge_cf(
-                self.index_cf,
+                self.db.cf_handle("index").unwrap(),
                 &key[..],
                 &DocIdsMsg::one(doc_id).serialize()[..],
             )?;
@@ -320,7 +334,7 @@ impl Store {
         key.extend(base_key.as_bytes());
         key.extend(value.as_bytes());
         batch.merge_cf(
-            self.index_cf,
+            self.db.cf_handle("index").unwrap(),
             &key[..],
             &DocIdsMsg::one(doc_id).serialize()[..],
         )?;
@@ -337,7 +351,7 @@ impl Store {
         BigEndian::write_i64(&mut v, value);
         key.extend(&v[..]);
         batch.merge_cf(
-            self.index_cf,
+            self.db.cf_handle("index").unwrap(),
             &key[..],
             &DocIdsMsg::one(doc_id).serialize()[..],
         )?;
@@ -355,7 +369,7 @@ impl Store {
             BigEndian::write_u32(&mut v, *col);
             key.extend(&v[..]);
             batch.merge_cf(
-                self.index_cf,
+                self.db.cf_handle("index").unwrap(),
                 &key[..],
                 &DocIdsMsg::one(doc_id).serialize()[..],
             )?;
@@ -400,7 +414,7 @@ impl Store {
             let mut v: Vec<u8> = vec![0; 4];
             BigEndian::write_u32(&mut v, *col);
             key.extend(&v[..]);
-            batch.put_cf(self.mod_cf, &key[..], b"add")?;
+            batch.put_cf(self.db.cf_handle("mod").unwrap(), &key[..], b"add")?;
         }
 
         self.shred(&mut batch, &doc_id, msg)?;
@@ -409,14 +423,14 @@ impl Store {
             let base_eml_key = "eml#";
             let mut key: Vec<u8> = Vec::with_capacity(base_eml_key.len() + 4);
             key.extend(&doc_id.write()[..]);
-            batch.put_cf(self.eml_cf, &key[..], &msg.eml[..])?;
+            batch.put_cf(self.db.cf_handle("eml").unwrap(), &key[..], &msg.eml[..])?;
         }
         self.db.write(batch)?;
         Ok(())
     }
 
     pub fn compact(&self) {
-        self.db.compact_range_cf(self.index_cf, None, None);
+        self.db.compact_range_cf(self.db.cf_handle("index").unwrap(), None, None);
     }
 
     pub fn iterate_date(&self) -> Result<StoreIt, StoreError> {
@@ -424,7 +438,7 @@ impl Store {
         key.extend(b"msg#date#".iter());
 
         use rocksdb::DBIterator;
-        let it: DBIterator = self.db.prefix_iterator_cf(self.index_cf, &key[..])?;
+        let it: DBIterator = self.db.prefix_iterator_cf(self.db.cf_handle("index").unwrap(), &key[..])?;
         Ok(StoreIt(it))
     }
 
@@ -465,13 +479,14 @@ impl Store {
     }
 
     pub fn collections(&self) -> Result<Vec<Collection>, StoreError> {
-        let c = self.cols
+        Store::collections_internal(&self.db)
+        /*let c = self.cols
             .read()
             .map_err(|_| StoreError::DbError("lock".to_string()))?;
         Ok(c.0
             .iter()
             .map(|(key, value)| Collection(*key, value.clone()))
-            .collect())
+            .collect())*/
     }
 
     pub fn find_by_name(&self, name: &str) -> Result<Option<DocIdSet>, StoreError> {
@@ -481,7 +496,7 @@ impl Store {
         use std::time::Instant;
         let now = Instant::now();
 
-        let res = self.db.get_cf(self.index_cf, &key[..])?;
+        let res = self.db.get_cf(self.db.cf_handle("index").unwrap(), &key[..])?;
         let elapsed = now.elapsed();
         let sec = (elapsed.as_secs() as f64) + (elapsed.subsec_nanos() as f64 / 1000_000.0);
         println!("find rocks: {} ms", sec);
@@ -508,7 +523,7 @@ impl Store {
         use std::time::Instant;
         let now = Instant::now();
 
-        let res = self.db.get_cf(self.index_cf, &key[..])?;
+        let res = self.db.get_cf(self.db.cf_handle("index").unwrap(), &key[..])?;
         let elapsed = now.elapsed();
         let sec = (elapsed.as_secs() as f64) + (elapsed.subsec_nanos() as f64 / 1000_000.0);
         println!("find rocks: {} ms", sec);
