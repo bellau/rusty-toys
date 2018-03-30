@@ -60,8 +60,6 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::collections::HashMap;
 
-
-
 unsafe impl Send for Store {}
 
 pub struct Store {
@@ -84,7 +82,6 @@ pub struct Msg {
     pub from: Option<String>,
     pub text: String,
     pub date: i64,
-    pub collections: Vec<u32>,
     pub eml: Vec<u8>,
 }
 
@@ -133,6 +130,12 @@ impl DocIdsMsg {
 }
 
 pub type DocIds = Vec<u32>;
+
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StoreError {
+    DbError(String),
+}
 
 impl From<rocksdb::Error> for StoreError {
     fn from(e: Error) -> StoreError {
@@ -184,10 +187,9 @@ fn concat_merge(_new_key: &[u8], existing_val: Option<&[u8]>, operands: &mut Mer
 
 pub struct StoreIt(rocksdb::DBIterator);
 
-use std::fmt::{Formatter,Debug,Result as FmtResult};
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 impl Debug for Store {
-    fn fmt(&self, f : &mut Formatter) -> FmtResult {
-        
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
         write!(f, "hell")
     }
 }
@@ -195,10 +197,6 @@ impl Store {
     fn default_options() -> Options {
         let mut dopts = Options::default();
         dopts.set_merge_operator("test", concat_merge, None);
-        dopts.create_if_missing(true);
-        dopts.set_report_bg_io_stats(true);
-        dopts.enable_statistics();
-        dopts.set_stats_dump_period_sec(10);
         let mut bb_opts = BlockBasedOptions::default();
         bb_opts.set_lru_cache(10_000);
         bb_opts.set_cache_index_and_filter_blocks(true);
@@ -209,31 +207,26 @@ impl Store {
     fn eml_options() -> Options {
         let mut dopts = Options::default();
         dopts.set_merge_operator("test", concat_merge, None);
-        dopts.create_if_missing(true);
-        dopts.set_report_bg_io_stats(true);
-        dopts.enable_statistics();
         let mut bb_opts = BlockBasedOptions::default();
         bb_opts.set_lru_cache(10_000);
         dopts.set_block_based_table_factory(&bb_opts);
         dopts.set_compression_per_level(&[
-         rocksdb::DBCompressionType::Snappy,
-         rocksdb::DBCompressionType::Snappy,]);
+            rocksdb::DBCompressionType::None,
+            rocksdb::DBCompressionType::Snappy,
+            rocksdb::DBCompressionType::Snappy,
+        ]);
+
         dopts
     }
 
     fn index_options() -> Options {
-        let mut opts = Options::default();
-        opts.set_merge_operator("test", concat_merge, None);
-
-        opts.create_if_missing(true);
-        opts.set_report_bg_io_stats(true);
-        opts.enable_statistics();
-        opts.set_stats_dump_period_sec(1);
+        let mut dopts = Options::default();
+        dopts.set_merge_operator("test", concat_merge, None);
         let mut bb_opts = BlockBasedOptions::default();
         bb_opts.set_lru_cache(100_000_000);
         bb_opts.set_cache_index_and_filter_blocks(true);
-        opts.set_block_based_table_factory(&bb_opts);
-        opts
+        dopts.set_block_based_table_factory(&bb_opts);
+        dopts
     }
 
     pub fn open(path: &str) -> Result<Store, StoreError> {
@@ -245,17 +238,18 @@ impl Store {
         gopts.set_report_bg_io_stats(true);
         gopts.enable_statistics();
         gopts.set_stats_dump_period_sec(1);
-        let mut bb_opts = BlockBasedOptions::default();
-        bb_opts.set_lru_cache(1_000);
-        bb_opts.set_cache_index_and_filter_blocks(true);
-        gopts.set_block_based_table_factory(&bb_opts);
 
         let default_cf = ColumnFamilyDescriptor::new("default", Store::default_options());
         let index_cf = ColumnFamilyDescriptor::new("index", Store::index_options());
+        let col_cf = ColumnFamilyDescriptor::new("col", Store::index_options());
         let eml_cf = ColumnFamilyDescriptor::new("eml", Store::eml_options());
 
         let mod_cf = ColumnFamilyDescriptor::new("mod", Store::index_options());
-        let db = DB::open_cf_descriptors(&gopts, path, vec![default_cf, index_cf, mod_cf, eml_cf])?;
+        let db = DB::open_cf_descriptors(
+            &gopts,
+            path,
+            vec![default_cf, index_cf, col_cf, mod_cf, eml_cf],
+        )?;
         let mod_cf = match db.cf_handle("mod") {
             Some(i) => i,
             None => panic!(""),
@@ -302,7 +296,8 @@ impl Store {
         BigEndian::write_u64(&mut data[..], max);
 
         ;
-        self.db.put_cf(self.db.cf_handle("mod").unwrap(), b"modseq_max", &data[..])?;
+        self.db
+            .put_cf(self.db.cf_handle("mod").unwrap(), b"modseq_max", &data[..])?;
         Ok(max)
     }
 
@@ -359,7 +354,7 @@ impl Store {
         Ok(())
     }
 
-    fn shred_collection(&self, batch: &mut WriteBatch, doc_id: &DocId, collections: &Vec<u32>) -> Result<(), StoreError> {
+    fn shred_collections(&self, batch: &mut WriteBatch, doc_id: &DocId, collections: &Vec<u32>) -> Result<(), StoreError> {
         let base_key = "msg#cols#";
         for col in collections {
             let mut key: Vec<u8> = Vec::with_capacity(base_key.len() + 4);
@@ -386,7 +381,6 @@ impl Store {
         self.shred_text(batch, doc_id, "body", &msg.text)?;
 
         self.shred_date(batch, doc_id, "date", msg.date)?;
-        self.shred_collection(batch, doc_id, &msg.collections)?;
         let subject = msg.subject.as_ref();
         if let Some(subject) = subject {
             self.shred_text(batch, doc_id, "subject", subject)
@@ -395,14 +389,35 @@ impl Store {
         }
     }
 
-    pub fn put(&self, msg: &Msg) -> Result<(), StoreError> {
+    pub fn modify(&self, msgs: Vec<u8>, added_collections: Vec<u32>, removed_collections: Vec<u32>) -> Result<(), StoreError> {
+        for msg in msgs {}
+        Ok(())
+    }
+
+    fn next_col_id(&self, col: u32) -> Result<u32, StoreError> {
+        let mut key = Vec::new();
+        key.extend(b"col_seq#".iter());
+        let mut v: Vec<u8> = vec![0; 4];
+        BigEndian::write_u32(&mut v, col);
+        key.extend(&v[..]);
+        let value = self.db.get_cf(self.db.cf_handle("col").unwrap(),&key[..])?;
+        let next_col_id = if let Some(value) = value {
+            BigEndian::read_u32(&value) + 1
+        } else {
+            1
+        };
+        Ok(next_col_id)
+    }
+
+    pub fn put(&self, collections: &Vec<u32>, msg: &Msg) -> Result<(), StoreError> {
         let doc_id = self.next_doc()?;
 
         let mut batch = WriteBatch::default();
 
         // mod log
         let base_mod_key = "mod#";
-        for col in &msg.collections {
+        for col in collections {
+            let col_id = self.next_col_id(*col)?;
             let modseq = self.next_modseq()?;
             let mut key: Vec<u8> = Vec::with_capacity(base_mod_key.len() + 8);
             key.extend(base_mod_key.as_bytes());
@@ -416,7 +431,7 @@ impl Store {
             key.extend(&v[..]);
             batch.put_cf(self.db.cf_handle("mod").unwrap(), &key[..], b"add")?;
         }
-
+        self.shred_collections(&mut batch, &doc_id, collections)?;
         self.shred(&mut batch, &doc_id, msg)?;
 
         {
@@ -430,7 +445,8 @@ impl Store {
     }
 
     pub fn compact(&self) {
-        self.db.compact_range_cf(self.db.cf_handle("index").unwrap(), None, None);
+        self.db
+            .compact_range_cf(self.db.cf_handle("index").unwrap(), None, None);
     }
 
     pub fn iterate_date(&self) -> Result<StoreIt, StoreError> {
@@ -438,7 +454,8 @@ impl Store {
         key.extend(b"msg#date#".iter());
 
         use rocksdb::DBIterator;
-        let it: DBIterator = self.db.prefix_iterator_cf(self.db.cf_handle("index").unwrap(), &key[..])?;
+        let it: DBIterator = self.db
+            .prefix_iterator_cf(self.db.cf_handle("index").unwrap(), &key[..])?;
         Ok(StoreIt(it))
     }
 
@@ -452,7 +469,11 @@ impl Store {
         let v = doc_id.write();
         key.extend(&v[..]);
 
-        batch.put(&key[..], &name.as_bytes())?;
+        batch.put_cf(
+            self.db.cf_handle("col").unwrap(),
+            &key[..],
+            &name.as_bytes(),
+        )?;
         self.db.write(batch)?;
         Ok(Collection(doc_id.0, name))
     }
@@ -463,7 +484,7 @@ impl Store {
 
         let mut ret = vec![];
         use rocksdb::DBIterator;
-        let it: DBIterator = db.prefix_iterator(&key[..]);
+        let it: DBIterator = db.prefix_iterator_cf(db.cf_handle("col").unwrap(), &key[..])?;
         for v in it {
             let k = v.0;
             if k.len() < b"collections#".len() || &k[0..b"collections#".len()] != b"collections#" {
@@ -480,13 +501,6 @@ impl Store {
 
     pub fn collections(&self) -> Result<Vec<Collection>, StoreError> {
         Store::collections_internal(&self.db)
-        /*let c = self.cols
-            .read()
-            .map_err(|_| StoreError::DbError("lock".to_string()))?;
-        Ok(c.0
-            .iter()
-            .map(|(key, value)| Collection(*key, value.clone()))
-            .collect())*/
     }
 
     pub fn find_by_name(&self, name: &str) -> Result<Option<DocIdSet>, StoreError> {
@@ -496,7 +510,8 @@ impl Store {
         use std::time::Instant;
         let now = Instant::now();
 
-        let res = self.db.get_cf(self.db.cf_handle("index").unwrap(), &key[..])?;
+        let res = self.db
+            .get_cf(self.db.cf_handle("index").unwrap(), &key[..])?;
         let elapsed = now.elapsed();
         let sec = (elapsed.as_secs() as f64) + (elapsed.subsec_nanos() as f64 / 1000_000.0);
         println!("find rocks: {} ms", sec);
@@ -523,7 +538,8 @@ impl Store {
         use std::time::Instant;
         let now = Instant::now();
 
-        let res = self.db.get_cf(self.db.cf_handle("index").unwrap(), &key[..])?;
+        let res = self.db
+            .get_cf(self.db.cf_handle("index").unwrap(), &key[..])?;
         let elapsed = now.elapsed();
         let sec = (elapsed.as_secs() as f64) + (elapsed.subsec_nanos() as f64 / 1000_000.0);
         println!("find rocks: {} ms", sec);

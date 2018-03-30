@@ -16,6 +16,7 @@ use rockyproto::*;
 use rockyproto_grpc::*;
 use std::cell::Cell;
 use std::sync::Mutex;
+use grpc::RequestOptions;
 
 struct MessageStoreImpl {
     store: Store,
@@ -29,12 +30,10 @@ impl MessageStore for MessageStoreImpl {
             from: None,
             text: "test".to_string(),
             date: 0,
-            collections: cols.clone(),
             eml: b"".to_vec(),
         };
 
-        println!("put msg");
-        self.store.put(&sm).unwrap();
+        self.store.put(&cols, &sm).unwrap();
 
         grpc::SingleResponse::completed(PutResponse::new())
     }
@@ -47,7 +46,8 @@ impl MessageStore for MessageStoreImpl {
                 col.set_id(c.0);
                 col.set_name(c.1.clone());
                 col
-            }).collect();
+            })
+            .collect();
 
         let mut r = CollectionsResponse::new();
         r.set_collections(ret);
@@ -72,9 +72,7 @@ pub fn main() {
     use std::thread;
 
     let store = Store::open("/tmp/teststorage").unwrap();
-    let storeServer = MessageStoreImpl { 
-            store : store
-    };
+    let storeServer = MessageStoreImpl { store: store };
     let mut server = grpc::ServerBuilder::new_plain();
     server.http.set_port(50051);
     server.add_service(MessageStoreServer::new_service_def(storeServer));
